@@ -4,18 +4,21 @@ build-backend = "hatchling.build"
 
 [project]
 name = "nodal"
-version = "1.0.0"
-description = "Graphe d'appels interactif façon éditeur de nœuds Blender pour du code Python"
+version = "2.0.0"
+description = "Graphe d'appels interactif façon éditeur de nœuds Blender pour du code Python et C++"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
-keywords = ["ast", "call-graph", "visualization", "static-analysis"]
+keywords = ["ast", "call-graph", "visualization", "static-analysis", "cpp"]
 classifiers = [
   "Programming Language :: Python :: 3",
   "Topic :: Software Development :: Documentation",
   "License :: OSI Approved :: MIT License",
 ]
 dependencies = []
+
+[project.optional-dependencies]
+clang = ["libclang>=16"]
 
 [project.scripts]
 nodal = "nodal.__main__:main"

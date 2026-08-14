@@ -13,7 +13,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-      - name: Générer le graphe de démonstration
-        run: python -m nodal demo.py -o /tmp/graph.html
-      - name: Vérifier l'auto-analyse
-        run: python -m nodal nodal/analyzer.py -o /tmp/self.html
+      - name: Démo Python
+        run: python -m nodal demo.py -o /tmp/py.html
+      - name: Démo C++
+        run: python -m nodal demo.cpp -o /tmp/cpp.html
+      - name: Auto-analyse
+        run: python -m nodal nodal/cpp.py -o /tmp/self.html
+      - name: Erreurs attendues
+        run: |
+          ! python -m nodal absent.py 2>/dev/null
+          ! python -m nodal README.md -o /tmp/x.html 2>/dev/null

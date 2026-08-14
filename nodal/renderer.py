@@ -7,7 +7,7 @@ import json
 from dataclasses import asdict
 from pathlib import Path
 
-from .analyzer import Graph, layout
+from .model import Graph, layout
 
 
 def render_html(graph: Graph, output: str | Path) -> Path:
@@ -19,6 +19,7 @@ def render_html(graph: Graph, output: str | Path) -> Path:
         "classes": [asdict(c) for c in graph.classes],
         "edges": [asdict(e) for e in graph.edges],
         "depth": layout(graph),
+        "lang": graph.lang,
     }
     payload = json.dumps(data, ensure_ascii=False).replace("</", "<\\/")
     out = Path(output)
@@ -32,13 +33,17 @@ def render_markdown(graph: Graph, output: str | Path) -> Path:
     by_src: dict[str, list] = {}
     for e in graph.edges:
         by_src.setdefault(e.src, []).append(e)
+    grouped: set[str] = set()
     for cls in graph.classes:
-        lines += [f"## classe `{cls.name}`", ""]
+        lines += [f"## {cls.stereotype} `{cls.name}`", ""]
         for m in cls.members:
             lines += _md_entry(m, by_src, indent="")
-    lines += ["## fonctions", ""]
-    for f in graph.functions:
-        if f.cls is None:
+            grouped.add(m)
+        lines.append("")
+    free = [f for f in graph.functions if f.id not in grouped]
+    if free:
+        lines += ["## fonctions libres", ""]
+        for f in free:
             lines += _md_entry(f.id, by_src, indent="")
     out = Path(output)
     out.write_text("\n".join(lines), encoding="utf-8")
@@ -107,7 +112,7 @@ button:hover{border-color:var(--accent)}
 .frame span{position:absolute;top:8px;left:12px;color:#8fd4d4;letter-spacing:.06em;
   font-weight:600;background:#1a2626;border:1px solid #35504f;border-radius:6px;
   padding:2px 10px}
-.frame span::before{content:'class ';color:var(--dim);font-weight:400}
+.frame span::before{content:attr(data-kw);color:var(--dim);font-weight:400}
 /* ---------- nœuds ---------- */
 .node{position:absolute;width:340px;background:var(--node);border:1px solid var(--node-border);
   border-radius:9px;box-shadow:0 10px 28px rgba(0,0,0,.45);user-select:none}
@@ -137,7 +142,7 @@ button:hover{border-color:var(--accent)}
 .ext-list{padding:8px 14px;color:var(--dim)}
 .ext-list div::before{content:'· ';color:var(--ext)}
 /* ---------- coloration ---------- */
-.k{color:#c792ea}.s{color:#9ccc76}.c{color:#5d5d66;font-style:italic}
+.p{color:#c9a06a}.k{color:#c792ea}.s{color:#9ccc76}.c{color:#5d5d66;font-style:italic}
 .n{color:#e3a86e}.d{color:#7fb4f0;font-weight:600}
 /* ---------- fils ---------- */
 path.w{fill:none;stroke:var(--wire);stroke-width:2;opacity:.55}
@@ -177,9 +182,15 @@ const nodes=new Map();        // id -> {el,x,y,kind,cls,hidden,collapsed,lineno}
 let sel=null;
 
 /* ---------- coloration syntaxique (tokenizer une passe) ---------- */
-const TOK=/(#.*$)|('(?:\\.|[^'\\])*'|"(?:\\.|[^"\\])*")|\b(def|class|return|if|elif|else|for|while|try|except|finally|with|as|import|from|pass|raise|yield|lambda|and|or|not|in|is|None|True|False|async|await|self|cls)\b|\b(\d+\.?\d*)\b/g;
+const KW_PY='def|class|return|if|elif|else|for|while|try|except|finally|with|as|import|from|pass|raise|yield|lambda|and|or|not|in|is|None|True|False|async|await|self|cls';
+const KW_CPP='alignas|auto|bool|break|case|catch|char|class|const|constexpr|continue|decltype|default|delete|do|double|else|enum|explicit|export|extern|false|float|for|friend|goto|if|inline|int|long|mutable|namespace|new|noexcept|nullptr|operator|override|private|protected|public|return|short|signed|sizeof|static|struct|switch|template|this|throw|true|try|typedef|typename|union|unsigned|using|virtual|void|volatile|while';
+const CPP=DATA.lang==='cpp';
+const CMT=CPP?"(\\/\\/.*$)":"(#.*$)";
+const TOK=new RegExp(CMT+"|('(?:\\\\.|[^'\\\\])*'|\"(?:\\\\.|[^\"\\\\])*\")|\\b("+(CPP?KW_CPP:KW_PY)+")\\b|\\b(\\d+\\.?\\d*)\\b","g");
+const PRE=/^\s*#\s*\w+/;
 const esc=x=>x.replace(/&/g,'&amp;').replace(/</g,'&lt;');
 function hl(line){
+  if(CPP&&PRE.test(line))return `<span class="p">${esc(line)}</span>`;
   let out='',last=0,m;TOK.lastIndex=0;
   while((m=TOK.exec(line))){
     out+=esc(line.slice(last,m.index));
@@ -217,27 +228,47 @@ function makeNode(f){
   return el;
 }
 
-/* Colonnes par profondeur, empilement vertical, membres de classe adjacents. */
+/* Placement en couloirs : x = profondeur d'appel, y = couloir du groupe.
+   Chaque classe/namespace occupe une bande horizontale propre, donc les
+   cadres ne se chevauchent jamais même si leurs membres couvrent plusieurs
+   colonnes. Les fonctions libres et les externes ont leurs propres couloirs. */
 function build(){
   document.getElementById('file').textContent=' · '+DATA.path;
-  const cols={};
-  const all=[...DATA.functions,...DATA.externals.map(e=>({...e,kind:'external',cls:null,lineno:0}))];
-  all.sort((a,b)=>(a.cls||'').localeCompare(b.cls||''));
+  const COL=430,GAP=46,LANE=70;
+  const all=[...DATA.functions,
+             ...DATA.externals.map(e=>({...e,kind:'external',cls:null}))];
+  const owner=new Map();                       // id -> nom du groupe
+  for(const g of DATA.classes) for(const m of g.members) owner.set(m,g.name);
+
+  // couloirs : fonctions libres, puis chaque groupe, puis les externes
+  const lanes=[{key:'',items:[]}];
+  const byKey=new Map([['',lanes[0]]]);
+  for(const g of DATA.classes){const l={key:g.name,items:[]};lanes.push(l);byKey.set(g.name,l);}
+  const extLane={key:'\u0000ext',items:[]};lanes.push(extLane);
   for(const f of all){
-    const d=DATA.depth[f.id]??0;(cols[d]??=[]).push(f);
+    const lane=f.kind==='external'?extLane:(byKey.get(owner.get(f.id))||lanes[0]);
+    lane.items.push(f);
   }
-  for(const[d,list]of Object.entries(cols)){
-    let y=0,prevCls;
-    for(const f of list){
-      if(f.cls!==prevCls){y+=prevCls===undefined?0:64;prevCls=f.cls;}
+
+  let top=0;
+  for(const lane of lanes){
+    if(!lane.items.length)continue;
+    const cols=new Map();
+    let height=0;
+    for(const f of lane.items){
       const el=makeNode(f);
-      const n={el,x:+d*430,y,kind:f.kind,cls:f.cls,hidden:false,collapsed:false,lineno:f.lineno};
+      const d=DATA.depth[f.id]??0;
+      const y=cols.get(d)??0;
+      const n={el,x:d*COL,y:top+y,kind:f.kind,cls:owner.get(f.id)||null,
+               hidden:false,collapsed:false,lineno:f.lineno};
       nodes.set(f.id,n);place(n);
-      y+=el.offsetHeight+46;
+      const next=y+el.offsetHeight+GAP;
+      cols.set(d,next);height=Math.max(height,next);
     }
+    top+=height+LANE;
   }
-  // fils : marquer les lignes d'appel dans la source
-  for(const e of DATA.edges){
+
+  for(const e of DATA.edges){                  // marquer les lignes d'appel
     const src=nodes.get(e.src);if(!src)continue;
     const ln=src.el.querySelector(`.ln[data-l="${e.lineno}"]`);
     if(ln)ln.classList.add('call');
@@ -283,7 +314,7 @@ function drawFrames(){
           Y=Math.max(...members.map(n=>n.y+n.el.offsetHeight))+P;
     const f=document.createElement('div');f.className='frame';
     f.style.cssText=`left:${x}px;top:${y}px;width:${X-x}px;height:${Y-y}px`;
-    f.innerHTML=`<span>${c.name}</span>`;
+    f.innerHTML=`<span data-kw="${c.stereotype||'class'} ">${c.name}</span>`;
     layerF.appendChild(f);
   }
 }

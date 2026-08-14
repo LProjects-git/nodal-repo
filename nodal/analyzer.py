@@ -8,61 +8,9 @@ sortent vers l'extérieur (modules importés, builtins...).
 from __future__ import annotations
 
 import ast
-from dataclasses import dataclass, field
 from pathlib import Path
 
-
-class AnalysisError(Exception):
-    """Erreur d'analyse lisible (fichier introuvable, syntaxe invalide...)."""
-
-
-# --------------------------------------------------------------------------- #
-# Modèle de données
-# --------------------------------------------------------------------------- #
-
-@dataclass
-class FuncNode:
-    """Une fonction ou méthode définie dans le fichier."""
-    id: str                      # identifiant unique : "func" ou "Classe.methode"
-    name: str
-    kind: str                    # "function" | "method"
-    cls: str | None              # nom de la classe si méthode
-    lineno: int                  # ligne du `def`
-    source: str                  # code source complet de la fonction
-    signature: str               # ex: "(self, x, *, retry=3)"
-
-
-@dataclass
-class ExternalNode:
-    """Un symbole appelé mais non défini dans le fichier (module, builtin...)."""
-    id: str                      # ex: "ext:os"
-    name: str                    # ex: "os"
-    members: list[str] = field(default_factory=list)  # ex: ["path.join", "getenv"]
-
-
-@dataclass
-class Edge:
-    """Un appel : `src` appelle `dst` à la ligne `lineno` (absolue)."""
-    src: str
-    dst: str
-    lineno: int
-    external: bool = False
-
-
-@dataclass
-class ClassGroup:
-    name: str
-    lineno: int
-    members: list[str] = field(default_factory=list)
-
-
-@dataclass
-class Graph:
-    path: str
-    functions: list[FuncNode]
-    externals: list[ExternalNode]
-    classes: list[ClassGroup]
-    edges: list[Edge]
+from .model import AnalysisError, ClassGroup, Edge, ExternalNode, FuncNode, Graph
 
 
 # --------------------------------------------------------------------------- #
@@ -110,7 +58,7 @@ class _CallCollector(ast.NodeVisitor):
 # Analyse du module
 # --------------------------------------------------------------------------- #
 
-def analyze(path: str | Path) -> Graph:
+def analyze_python(path: str | Path) -> Graph:
     """Analyse `path` et retourne le graphe d'appels du fichier."""
     path = Path(path)
     if not path.is_file():
@@ -268,37 +216,5 @@ def analyze(path: str | Path) -> Graph:
         externals=list(externals.values()),
         classes=classes,
         edges=edges,
+        lang="python",
     )
-
-
-# --------------------------------------------------------------------------- #
-# Placement automatique (couches par profondeur d'appel)
-# --------------------------------------------------------------------------- #
-
-def layout(graph: Graph) -> dict[str, int]:
-    """Assigne à chaque nœud une couche (colonne) : les appelants à gauche,
-    les appelés à droite, les externes tout à droite."""
-    internal = [e for e in graph.edges if not e.external]
-    callees = {e.dst for e in internal}
-    depth: dict[str, int] = {}
-
-    def walk(nid: str, d: int, trail: frozenset[str]) -> None:
-        if nid in trail:                                # cycle -> stop
-            return
-        if depth.get(nid, -1) >= d:
-            return
-        depth[nid] = d
-        for e in internal:
-            if e.src == nid:
-                walk(e.dst, d + 1, trail | {nid})
-
-    roots = [f.id for f in graph.functions if f.id not in callees] or \
-            [f.id for f in graph.functions[:1]]
-    for r in roots:
-        walk(r, 0, frozenset())
-    for f in graph.functions:                           # nœuds isolés
-        depth.setdefault(f.id, 0)
-    last = max(depth.values(), default=0) + 1
-    for ext in graph.externals:
-        depth[ext.id] = last
-    return depth
