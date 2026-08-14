@@ -140,6 +140,7 @@ button:hover{border-color:var(--accent)}
   scrollbar-color:var(--line) transparent}
 .node.collapsed .code{display:none}
 .ln{padding:0 14px 0 12px;white-space:pre;color:var(--text);position:relative}
+.ln.more{color:var(--dim);font-style:italic}
 .ln.call{background:color-mix(in srgb,var(--accent) 10%,transparent)}
 .ln.call::after{content:'';position:absolute;right:-6px;top:50%;width:10px;height:10px;
   transform:translateY(-50%);border-radius:50%;background:var(--accent);
@@ -169,6 +170,7 @@ path.w.off{opacity:.06}
   <label class="tgl"><input type="checkbox" id="t-me" checked>méthodes</label>
   <label class="tgl"><input type="checkbox" id="t-ex" checked>externes</label>
   <select id="f-file" style="display:none"></select>
+  <button id="fold">Replier tout</button>
   <button id="reset">Tout réafficher</button>
   <button id="fit">Recentrer</button>
   <span id="stats"></span>
@@ -180,7 +182,7 @@ path.w.off{opacity:.06}
     <div id="nodes"></div>
   </div>
 </div>
-<div id="hint">glisser : déplacer · molette : zoom · fond : panoramique · ◌ jaune = ligne d'appel</div>
+<div id="hint">glisser : déplacer · molette : zoom · double-clic : isoler le voisinage · ◌ jaune = ligne d'appel</div>
 <script>
 const DATA = /*__DATA__*/null;
 
@@ -188,7 +190,11 @@ const world=document.getElementById('world'),vp=document.getElementById('viewpor
       svg=document.getElementById('wires'),layerN=document.getElementById('nodes'),
       layerF=document.getElementById('frames');
 const view={x:60,y:90,k:1};
-const nodes=new Map();        // id -> {el,x,y,kind,cls,hidden,collapsed,lineno}
+const nodes=new Map();        // id -> {el,x,y,w,h,kind,...}
+const WIRES=[];               // arêtes pré-résolues (voir build)
+const BIG=(DATA.functions.length+DATA.externals.length)>120;
+const COLLAPSED=BIG;          // gros graphe : code replié au départ
+const LAZY=BIG;               // ... et code construit seulement au dépliage
 let sel=null;
 
 /* ---------- coloration syntaxique (tokenizer une passe) ---------- */
@@ -215,6 +221,60 @@ function hl(line){
 }
 
 /* ---------- construction des nœuds ---------- */
+/* Placement recalculé sur les seuls nœuds visibles : après un isolement ou
+   un masquage, on évite les grands vides laissés par les nœuds retirés. */
+let LANES=[];
+const COL=430,GAP=46,LANE=70;
+function positionNodes(){
+  const lanes=LANES;
+  //    Une colonne = une profondeur d'appel. Si trop de nœuds partagent la
+  //    même profondeur, la colonne déborde en sous-colonnes : sans cela un
+  //    projet large produit une bande verticale interminable.
+  //    Nombre de sous-colonnes choisi pour que chaque bloc reste à peu près
+  //    carré : trop peu et l'on obtient une bande verticale, trop et une
+  //    bande horizontale.
+  const stackOf=new Map();                     // "lane|profondeur" -> hauteur pile
+  const subcols=new Map();                     // profondeur -> nb de sous-colonnes
+  for(const lane of lanes){
+    const groups=new Map();
+    for(const f of lane.items){
+      if(nodes.get(f.id).hidden)continue;
+      const d=DATA.depth[f.id]??0;
+      (groups.get(d)??groups.set(d,[]).get(d)).push(nodes.get(f.id));
+    }
+    for(const[d,ns]of groups){
+      const avg=ns.reduce((a,n)=>a+n.h,0)/ns.length+GAP;
+      const cols=Math.max(1,Math.round(Math.sqrt(ns.length*avg/COL)));
+      stackOf.set(lane.key+'|'+d,Math.ceil(ns.length/cols));
+      subcols.set(d,Math.max(subcols.get(d)??1,cols));
+    }
+  }
+  const xOf=new Map();
+  let cursor=0;
+  for(const d of [...subcols.keys()].sort((a,b)=>a-b)){
+    xOf.set(d,cursor);cursor+=subcols.get(d)*COL;
+  }
+
+  let top=0;
+  for(const lane of lanes){
+    if(!lane.items.some(f=>!nodes.get(f.id).hidden))continue;
+    const seen=new Map();                      // profondeur -> nœuds déjà placés
+    const colY=new Map();                      // "d:sous-colonne" -> y courant
+    let height=0;
+    for(const f of lane.items){
+      const n=nodes.get(f.id);if(n.hidden)continue;
+      const d=DATA.depth[f.id]??0;
+      const i=seen.get(d)??0;seen.set(d,i+1);
+      const stack=stackOf.get(lane.key+'|'+d)??8;
+      const sub=Math.floor(i/stack),key=d+':'+sub;
+      const y=colY.get(key)??0;
+      n.x=(xOf.get(d)??0)+sub*COL;n.y=top+y;place(n);
+      const next=y+n.h+GAP;colY.set(key,next);height=Math.max(height,next);
+    }
+    top+=height+LANE;
+  }
+}
+
 function makeNode(f){
   const el=document.createElement('div');
   el.className='node';el.dataset.kind=f.kind;el.dataset.id=f.id;
@@ -222,119 +282,160 @@ function makeNode(f){
   const title=f.cls?`${f.cls}.<b>${f.name}</b>`:f.name;
   const sig=f.extkind==='unknown'?'définition introuvable':(f.signature||'');
   const badge=(MULTI&&f.file)?`<span class="fbadge">${f.file}</span>`:'';
+  let body;
+  if(LAZY&&f.kind!=='external'){body='';}      // corps construit au dépliage
+  else if(f.kind==='external'){
+    body='<div class="ext-list code">'+
+      (f.members.length?f.members:['(appel direct)']).map(m=>`<div>${m}</div>`).join('')+
+      '</div>';
+  }else{
+    // une seule chaîne HTML : bien plus rapide que createElement par ligne
+    const src=f.source.split('\n');
+    const rows=src.map((l,i)=>`<div class="ln" data-l="${f.lineno+i}">${hl(l)||' '}</div>`);
+    if(f.truncated)rows.push('<div class="ln more">…</div>');
+    body='<div class="code">'+rows.join('')+'</div>';
+  }
   el.innerHTML=`<span class="in"></span>
     <header><span>${title}</span>${badge}<span class="sig">${sig}</span>
-    <span class="eye" title="masquer">👁</span><span class="chev" title="replier">▾</span></header>`;
-  if(f.kind==='external'){
-    const d=document.createElement('div');d.className='ext-list code';
-    d.innerHTML=(f.members.length?f.members:['(appel direct)']).map(m=>`<div>${m}</div>`).join('');
-    el.appendChild(d);
-  }else{
-    const code=document.createElement('div');code.className='code';
-    f.source.split('\n').forEach((l,i)=>{
-      const d=document.createElement('div');d.className='ln';d.dataset.l=f.lineno+i;
-      d.innerHTML=hl(l)||' ';code.appendChild(d);
-    });
-    el.appendChild(code);
-  }
-  layerN.appendChild(el);
+    <span class="eye" title="masquer">👁</span><span class="chev" title="replier">▾</span></header>`
+    +body;
   return el;
 }
 
 /* Placement en couloirs : x = profondeur d'appel, y = couloir du groupe.
    Chaque classe/namespace occupe une bande horizontale propre, donc les
    cadres ne se chevauchent jamais même si leurs membres couvrent plusieurs
-   colonnes. Les fonctions libres et les externes ont leurs propres couloirs. */
+   colonnes. Les fonctions libres et les externes ont leurs propres couloirs.
+
+   Le DOM est construit d'un bloc, puis les hauteurs sont lues en une seule
+   passe : lire offsetHeight au fil de l'insertion forcerait un recalcul de
+   mise en page par nœud (le principal coût sur les gros graphes). */
 function build(){
   document.getElementById('file').textContent=' · '+DATA.path;
-  const COL=430,GAP=46,LANE=70;
   const all=[...DATA.functions,
              ...DATA.externals.map(e=>({...e,extkind:e.kind,kind:'external',cls:null}))];
-  const owner=new Map();                       // id -> nom du groupe
+  const owner=new Map();
   for(const g of DATA.classes) for(const m of g.members) owner.set(m,g.name);
 
-  // couloirs : fonctions libres, puis chaque groupe, puis les externes
   const lanes=[{key:'',items:[]}];
-  const byKey=new Map([['',lanes[0]]]);
+  const byKey=new Map();
   for(const g of DATA.classes){
-    const k=(g.file||'')+'|'+g.name;
-    const l={key:k,items:[]};lanes.push(l);
-    for(const m of g.members)byKey.set(m,l);      // membre -> couloir
+    const l={key:(g.file||'')+'|'+g.name,items:[]};lanes.push(l);
+    for(const m of g.members)byKey.set(m,l);
   }
   const extLane={key:'\u0000ext',items:[]};lanes.push(extLane);
   for(const f of all){
-    const lane=f.kind==='external'?extLane:(byKey.get(f.id)||lanes[0]);
-    lane.items.push(f);
+    (f.kind==='external'?extLane:(byKey.get(f.id)||lanes[0])).items.push(f);
   }
 
-  let top=0;
+  // 1. créer tout le DOM hors document
+  const frag=document.createDocumentFragment();
+  const order=[];
   for(const lane of lanes){
-    if(!lane.items.length)continue;
-    const cols=new Map();
-    let height=0;
     for(const f of lane.items){
       const el=makeNode(f);
-      const d=DATA.depth[f.id]??0;
-      const y=cols.get(d)??0;
-      const n={el,x:d*COL,y:top+y,kind:f.kind,cls:owner.get(f.id)||null,
-               file:f.file||'',extkind:f.extkind||null,
-               hidden:false,collapsed:false,lineno:f.lineno};
-      nodes.set(f.id,n);place(n);
-      const next=y+el.offsetHeight+GAP;
-      cols.set(d,next);height=Math.max(height,next);
+      if(COLLAPSED)el.classList.add('collapsed');
+      frag.appendChild(el);
+      const n={el,x:0,y:0,w:340,h:0,kind:f.kind,cls:owner.get(f.id)||null,
+               file:f.file||'',extkind:f.extkind||null,lane,data:f,
+               built:LAZY?false:true,
+               hidden:false,collapsed:COLLAPSED,lineno:f.lineno};
+      nodes.set(f.id,n);order.push([f,n]);
     }
-    top+=height+LANE;
   }
+  layerN.appendChild(frag);
 
-  for(const e of DATA.edges){                  // marquer les lignes d'appel
-    const src=nodes.get(e.src);if(!src)continue;
-    const ln=src.el.querySelector(`.ln[data-l="${e.lineno}"]`);
+  // 2. lire toutes les hauteurs d'un coup
+  for(const[,n]of order){n.h=n.el.offsetHeight;n.w=n.el.offsetWidth;}
+
+  LANES=lanes;positionNodes();
+
+  // 4. index des arêtes : résolu une fois, jamais re-cherché au dessin
+  for(const e of DATA.edges){
+    const s=nodes.get(e.src),t=nodes.get(e.dst);
+    if(!s||!t)continue;
+    const ln=s.el.querySelector(`.ln[data-l="${e.lineno}"]`);
     if(ln)ln.classList.add('call');
+    WIRES.push({s,t,ln,ext:e.external,src:e.src,dst:e.dst,lineno:e.lineno,
+                dy:ln?ln.offsetTop+ln.offsetHeight/2:0});
   }
 }
 function place(n){n.el.style.transform=`translate(${n.x}px,${n.y}px)`}
 
-/* ---------- fils (béziers) ---------- */
-function anchor(el){                    // coords écran -> coords monde
-  const r=el.getBoundingClientRect();
-  return{x:(r.left-view.x)/view.k,y:(r.top-view.y)/view.k,
-         w:r.width/view.k,h:r.height/view.k};
+/* Construit le code d'un nœud au premier dépliage, puis recale les fils
+   qui partent de ses lignes d'appel. */
+function materialize(n){
+  if(n.built||n.kind==='external')return;
+  n.built=true;
+  const f=n.data;
+  const src=f.source.split('\n');
+  const rows=src.map((l,i)=>`<div class="ln" data-l="${f.lineno+i}">${hl(l)||' '}</div>`);
+  if(f.truncated)rows.push('<div class="ln more">… source tronquée</div>');
+  n.el.insertAdjacentHTML('beforeend','<div class="code">'+rows.join('')+'</div>');
+  for(const w of WIRES){
+    if(w.s!==n)continue;
+    const ln=n.el.querySelector(`.ln[data-l="${w.lineno}"]`);
+    if(ln){ln.classList.add('call');w.ln=ln;w.dy=ln.offsetTop+ln.offsetHeight/2;}
+  }
+  n.h=n.el.offsetHeight;
+}
+
+/* ---------- fils (béziers) ----------
+   Géométrie calculée depuis les coordonnées stockées : aucun appel à
+   getBoundingClientRect, donc aucun recalcul de mise en page forcé.
+   Le SVG est assemblé en une seule chaîne plutôt que nœud par nœud. */
+const HEADER_H=32;
+function wireGeom(w){
+  const s=w.s,t=w.t;
+  const inBody=w.ln&&!s.collapsed;
+  const x1=s.x+s.w+(inBody?6:0);
+  const y1=s.y+(inBody?w.dy:HEADER_H/2);
+  const x2=t.x, y2=t.y+HEADER_H/2;
+  return[x1,y1,x2,y2];
 }
 function drawWires(){
-  svg.innerHTML='';
-  for(const e of DATA.edges){
-    const s=nodes.get(e.src),t=nodes.get(e.dst);
-    if(!s||!t||s.hidden||t.hidden||s.el.classList.contains('faded')||t.el.classList.contains('faded'))continue;
-    let srcEl=s.collapsed?null:s.el.querySelector(`.ln[data-l="${e.lineno}"]`);
-    const sa=anchor(srcEl||s.el.querySelector('header'));
-    const ta=anchor(t.el.querySelector('.in'));
-    const x1=sa.x+sa.w+ (srcEl?6:0), y1=sa.y+sa.h/2;
-    const x2=ta.x+ta.w/2, y2=ta.y+ta.h/2;
+  const parts=[];
+  // fenêtre visible en coordonnées monde, avec une marge
+  const M=400/view.k;
+  const vx0=-view.x/view.k-M, vy0=-view.y/view.k-M,
+        vx1=vx0+innerWidth/view.k+2*M, vy1=vy0+innerHeight/view.k+2*M;
+  for(const w of WIRES){
+    const s=w.s,t=w.t;
+    if(s.hidden||t.hidden||s.faded||t.faded)continue;
+    // hors champ des deux côtés : inutile de tracer
+    if(Math.max(s.x,t.x)<vx0||Math.min(s.x,t.x)>vx1||
+       Math.max(s.y,t.y)<vy0||Math.min(s.y,t.y)>vy1)continue;
+    const[x1,y1,x2,y2]=wireGeom(w);
     const dx=Math.max(60,Math.abs(x2-x1)*.45);
-    const p=document.createElementNS('http://www.w3.org/2000/svg','path');
-    p.setAttribute('d',`M${x1},${y1} C${x1+dx},${y1} ${x2-dx},${y2} ${x2},${y2}`);
-    p.setAttribute('class','w'+(e.external?(t.extkind==='unknown'?' unk':' ext'):''));
-    if(sel){p.classList.add(e.src===sel||e.dst===sel?'hot':'off');}
-    svg.appendChild(p);
+    let cls='w'+(w.ext?(t.extkind==='unknown'?' unk':' ext'):'');
+    if(sel)cls+=(w.src===sel||w.dst===sel)?' hot':' off';
+    parts.push(`<path class="${cls}" d="M${x1.toFixed(1)},${y1.toFixed(1)} `
+      +`C${(x1+dx).toFixed(1)},${y1.toFixed(1)} ${(x2-dx).toFixed(1)},${y2.toFixed(1)} `
+      +`${x2.toFixed(1)},${y2.toFixed(1)}"/>`);
   }
+  svg.innerHTML=parts.join('');
+}
+let wirePending=false;
+function scheduleWires(){                      // au plus un dessin par image
+  if(wirePending)return;
+  wirePending=true;
+  requestAnimationFrame(()=>{wirePending=false;drawWires();});
 }
 
 /* ---------- cadres de classe ---------- */
 function drawFrames(){
-  layerF.innerHTML='';
+  const parts=[];
   for(const c of DATA.classes){
-    const members=c.members.map(id=>nodes.get(id)).filter(n=>n&&!n.hidden);
-    if(!members.length)continue;
+    const ms=c.members.map(id=>nodes.get(id)).filter(n=>n&&!n.hidden&&!n.faded);
+    if(!ms.length)continue;
     const P=26;
-    const x=Math.min(...members.map(n=>n.x))-P,
-          y=Math.min(...members.map(n=>n.y))-P-30,
-          X=Math.max(...members.map(n=>n.x+n.el.offsetWidth))+P,
-          Y=Math.max(...members.map(n=>n.y+n.el.offsetHeight))+P;
-    const f=document.createElement('div');f.className='frame';
-    f.style.cssText=`left:${x}px;top:${y}px;width:${X-x}px;height:${Y-y}px`;
-    f.innerHTML=`<span data-kw="${c.stereotype||'class'} ">${c.name}</span>`;
-    layerF.appendChild(f);
+    const x=Math.min(...ms.map(n=>n.x))-P, y=Math.min(...ms.map(n=>n.y))-P-30,
+          X=Math.max(...ms.map(n=>n.x+n.w))+P, Y=Math.max(...ms.map(n=>n.y+n.h))+P;
+    parts.push(`<div class="frame" style="left:${x}px;top:${y}px;`
+      +`width:${X-x}px;height:${Y-y}px">`
+      +`<span data-kw="${c.stereotype||'class'} ">${c.name}</span></div>`);
   }
+  layerF.innerHTML=parts.join('');
 }
 
 /* ---------- filtres ---------- */
@@ -348,7 +449,8 @@ function applyFilters(){
     const okFile=!wantFile||n.kind==='external'||n.file===wantFile;
     const label=(id.split('::').pop()||id).toLowerCase();
     const okText=!q||label.includes(q);
-    n.el.classList.toggle('faded',!(okKind&&okText&&okFile));
+    n.faded=!(okKind&&okText&&okFile);
+    n.el.classList.toggle('faded',n.faded);
     n.el.style.display=n.hidden?'none':'';
     if(okKind&&okText&&okFile&&!n.hidden)visible++;
   }
@@ -361,14 +463,18 @@ function applyFilters(){
 
 /* ---------- interactions ---------- */
 function applyView(){world.style.transform=`translate(${view.x}px,${view.y}px) scale(${view.k})`}
-let drag=null;
+let drag=null,lastId=null,lastTime=0;
 vp.addEventListener('pointerdown',ev=>{
   const header=ev.target.closest('header'),nodeEl=ev.target.closest('.node');
   if(ev.target.classList.contains('chev')||ev.target.classList.contains('eye'))return;
   if(nodeEl&&(header||ev.target===nodeEl)){
-    const n=nodes.get(nodeEl.dataset.id);
-    select(nodeEl.dataset.id);
-    drag={n,px:ev.clientX,py:ev.clientY};
+    const id=nodeEl.dataset.id,now=performance.now();
+    if(id===lastId&&now-lastTime<350){        // double-clic : isoler
+      lastId=null;isolate(id);return;
+    }
+    lastId=id;lastTime=now;
+    select(id);
+    drag={n:nodes.get(id),px:ev.clientX,py:ev.clientY};
   }else if(!nodeEl){
     select(null);
     drag={pan:true,px:ev.clientX,py:ev.clientY};vp.classList.add('panning');
@@ -379,26 +485,29 @@ vp.addEventListener('pointermove',ev=>{
   if(!drag)return;
   const dx=ev.clientX-drag.px,dy=ev.clientY-drag.py;
   drag.px=ev.clientX;drag.py=ev.clientY;
-  if(drag.pan){view.x+=dx;view.y+=dy;applyView();}
-  else{drag.n.x+=dx/view.k;drag.n.y+=dy/view.k;place(drag.n);drawFrames();}
-  drawWires();
+  if(drag.pan){view.x+=dx;view.y+=dy;applyView();scheduleWires();return;}
+  drag.n.x+=dx/view.k;drag.n.y+=dy/view.k;place(drag.n);
+  scheduleWires();drawFrames();
 });
-vp.addEventListener('pointerup',()=>{drag=null;vp.classList.remove('panning')});
+vp.addEventListener('pointerup',ev=>{drag=null;vp.classList.remove('panning');
+  try{vp.releasePointerCapture(ev.pointerId);}catch(_){}});
 vp.addEventListener('wheel',ev=>{
   ev.preventDefault();
   const k=Math.min(2.2,Math.max(.2,view.k*(ev.deltaY<0?1.1:1/1.1)));
   view.x=ev.clientX-(ev.clientX-view.x)*k/view.k;
   view.y=ev.clientY-(ev.clientY-view.y)*k/view.k;
-  view.k=k;applyView();drawWires();
+  view.k=k;applyView();scheduleWires();
 },{passive:false});
 layerN.addEventListener('click',ev=>{
   const el=ev.target.closest('.node');if(!el)return;
   const n=nodes.get(el.dataset.id);
   if(ev.target.classList.contains('chev')){
+    if(n.collapsed)materialize(n);
     n.collapsed=!n.collapsed;el.classList.toggle('collapsed',n.collapsed);
-    ev.target.textContent=n.collapsed?'▸':'▾';drawFrames();drawWires();
+    ev.target.textContent=n.collapsed?'▸':'▾';n.h=el.offsetHeight;
+    drawFrames();drawWires();
   }else if(ev.target.classList.contains('eye')){
-    n.hidden=true;applyFilters();
+    n.hidden=true;positionNodes();applyFilters();
   }
 });
 function select(id){
@@ -430,10 +539,45 @@ if(MULTI){
 document.getElementById('search').addEventListener('input',applyFilters);
 document.getElementById('reset').addEventListener('click',()=>{
   for(const n of nodes.values())n.hidden=false;
-  document.getElementById('search').value='';applyFilters();
+  document.getElementById('search').value='';
+  if(fFile)fFile.value='';
+  sel=null;positionNodes();applyFilters();fit();
 });
 document.getElementById('fit').addEventListener('click',fit);
-addEventListener('resize',drawWires);
+
+/* Replier / déplier les nœuds visibles (les invisibles ne coûtent rien). */
+let allFolded=COLLAPSED;
+document.getElementById('fold').addEventListener('click',ev=>{
+  allFolded=!allFolded;
+  ev.target.textContent=allFolded?'Déplier tout':'Replier tout';
+  for(const n of nodes.values()){
+    if(n.hidden||n.faded||n.kind==='external')continue;
+    if(!allFolded)materialize(n);
+    n.collapsed=allFolded;
+    n.el.classList.toggle('collapsed',allFolded);
+    const chev=n.el.querySelector('.chev');if(chev)chev.textContent=allFolded?'▸':'▾';
+    n.h=n.el.offsetHeight;
+  }
+  positionNodes();drawFrames();drawWires();
+});
+
+/* Isoler le voisinage d'un nœud (2 sauts). Sur un gros projet on explore
+   ainsi de proche en proche sans régénérer le fichier ; « Tout réafficher »
+   revient en arrière. Le double-clic est détecté à la main : la capture du
+   pointeur pendant le glisser empêche l'événement dblclick natif d'arriver. */
+function isolate(id){
+  const keep=new Set([id]);
+  for(let hop=0;hop<2;hop++){
+    const front=new Set(keep);
+    for(const w of WIRES){
+      if(front.has(w.src))keep.add(w.dst);
+      if(front.has(w.dst))keep.add(w.src);
+    }
+  }
+  for(const[nid,n]of nodes)n.hidden=!keep.has(nid);
+  positionNodes();select(id);applyFilters();fit();
+}
+
 
 build();applyFilters();fit();
 </script>
