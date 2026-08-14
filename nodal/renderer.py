@@ -117,13 +117,16 @@ button:hover{border-color:var(--accent)}
   padding:2px 10px}
 .frame span::before{content:attr(data-kw);color:var(--dim);font-weight:400}
 /* ---------- nœuds ---------- */
-.node{position:absolute;width:340px;background:var(--node);border:1px solid var(--node-border);
+.node{position:absolute;width:340px;z-index:1;background:var(--node);border:1px solid var(--node-border);
   border-radius:9px;box-shadow:0 10px 28px rgba(0,0,0,.45);user-select:none}
-.node.sel{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent),0 12px 30px rgba(0,0,0,.55)}
+.node.sel{z-index:6;border-color:var(--accent);box-shadow:0 0 0 1px var(--accent),0 12px 30px rgba(0,0,0,.55)}
 .node.faded{opacity:.16;pointer-events:none}
+.code{user-select:text;cursor:auto}
 .node header{display:flex;align-items:center;gap:8px;padding:7px 12px;cursor:grab;
   border-radius:8px 8px 0 0;color:#fff;font-weight:600}
 .node.collapsed header{border-radius:8px}
+.node:not(.collapsed){z-index:4}
+.node:hover{z-index:8}
 .node[data-kind=function] header{background:linear-gradient(180deg,color-mix(in srgb,var(--fn) 92%,#fff),var(--fn))}
 .node[data-kind=method]   header{background:linear-gradient(180deg,color-mix(in srgb,var(--method) 92%,#fff),var(--method))}
 .node[data-kind=external] header{background:linear-gradient(180deg,color-mix(in srgb,var(--ext) 92%,#fff),var(--ext))}
@@ -136,7 +139,7 @@ button:hover{border-color:var(--accent)}
 .node header .chev{margin-left:auto;cursor:pointer;opacity:.8;padding:0 2px}
 .node header .eye{cursor:pointer;opacity:.8;padding:0 2px}
 .node header .chev:hover,.node header .eye:hover{opacity:1}
-.code{padding:8px 0;max-height:300px;overflow:auto;scrollbar-width:thin;
+.code{padding:8px 0;max-height:420px;overflow:auto;scrollbar-width:thin;
   scrollbar-color:var(--line) transparent}
 .node.collapsed .code{display:none}
 .ln{padding:0 14px 0 12px;white-space:pre;color:var(--text);position:relative}
@@ -268,7 +271,7 @@ function positionNodes(){
       const stack=stackOf.get(lane.key+'|'+d)??8;
       const sub=Math.floor(i/stack),key=d+':'+sub;
       const y=colY.get(key)??0;
-      n.x=(xOf.get(d)??0)+sub*COL;n.y=top+y;place(n);
+      n.x=(xOf.get(d)??0)+sub*COL;n.y=top+y;n.col=lane.key+'|'+d+':'+sub;place(n);
       const next=y+n.h+GAP;colY.set(key,next);height=Math.max(height,next);
     }
     top+=height+LANE;
@@ -361,6 +364,21 @@ function build(){
   }
 }
 function place(n){n.el.style.transform=`translate(${n.x}px,${n.y}px)`}
+
+/* Après un repli/dépli, la hauteur du nœud change : on décale ce qui est
+   en dessous dans la même colonne, sinon le code déplié recouvre le nœud
+   suivant. Le reste de la disposition — y compris les nœuds déplacés à la
+   main — n'est pas touché. */
+function reflowColumn(n){
+  const before=n.h;
+  n.h=n.el.offsetHeight;
+  const delta=n.h-before;
+  if(!delta||!n.col)return;
+  for(const other of nodes.values()){
+    if(other===n||other.col!==n.col||other.hidden)continue;
+    if(other.y>n.y){other.y+=delta;place(other);}
+  }
+}
 
 /* Construit le code d'un nœud au premier dépliage, puis recale les fils
    qui partent de ses lignes d'appel. */
@@ -468,30 +486,45 @@ vp.addEventListener('pointerdown',ev=>{
   const header=ev.target.closest('header'),nodeEl=ev.target.closest('.node');
   if(ev.target.classList.contains('chev')||ev.target.classList.contains('eye'))return;
   if(nodeEl&&(header||ev.target===nodeEl)){
-    const id=nodeEl.dataset.id,now=performance.now();
-    if(id===lastId&&now-lastTime<350){        // double-clic : isoler
-      lastId=null;isolate(id);return;
-    }
-    lastId=id;lastTime=now;
+    const id=nodeEl.dataset.id;
     select(id);
-    drag={n:nodes.get(id),px:ev.clientX,py:ev.clientY};
+    drag={n:nodes.get(id),id,px:ev.clientX,py:ev.clientY,moved:false};
   }else if(!nodeEl){
     select(null);
-    drag={pan:true,px:ev.clientX,py:ev.clientY};vp.classList.add('panning');
+    drag={pan:true,px:ev.clientX,py:ev.clientY,moved:false};
+    vp.classList.add('panning');
   }
   vp.setPointerCapture(ev.pointerId);
 });
 vp.addEventListener('pointermove',ev=>{
   if(!drag)return;
   const dx=ev.clientX-drag.px,dy=ev.clientY-drag.py;
+  if(Math.abs(dx)>2||Math.abs(dy)>2)drag.moved=true;
   drag.px=ev.clientX;drag.py=ev.clientY;
   if(drag.pan){view.x+=dx;view.y+=dy;applyView();scheduleWires();return;}
   drag.n.x+=dx/view.k;drag.n.y+=dy/view.k;place(drag.n);
   scheduleWires();drawFrames();
 });
-vp.addEventListener('pointerup',ev=>{drag=null;vp.classList.remove('panning');
-  try{vp.releasePointerCapture(ev.pointerId);}catch(_){}});
+vp.addEventListener('pointerup',ev=>{
+  // Un double-clic n'est reconnu que si aucune des deux pressions n'a bougé :
+  // sinon reprendre un nœud pour le déplacer déclencherait un isolement.
+  if(drag&&drag.id&&!drag.moved){
+    const now=performance.now();
+    if(drag.id===lastId&&now-lastTime<400){lastId=null;isolate(drag.id);}
+    else{lastId=drag.id;lastTime=now;}
+  }else{lastId=null;}
+  drag=null;vp.classList.remove('panning');
+  try{vp.releasePointerCapture(ev.pointerId);}catch(_){}
+});
+vp.addEventListener('pointercancel',()=>{drag=null;lastId=null;
+  vp.classList.remove('panning');});
 vp.addEventListener('wheel',ev=>{
+  // au-dessus d'un bloc de code plus long que sa fenêtre : défilement normal
+  const code=ev.target.closest&&ev.target.closest('.code');
+  if(code&&code.scrollHeight>code.clientHeight+2){
+    const top=code.scrollTop, max=code.scrollHeight-code.clientHeight;
+    if((ev.deltaY<0&&top>0)||(ev.deltaY>0&&top<max))return;   // laisser défiler
+  }
   ev.preventDefault();
   const k=Math.min(2.2,Math.max(.2,view.k*(ev.deltaY<0?1.1:1/1.1)));
   view.x=ev.clientX-(ev.clientX-view.x)*k/view.k;
@@ -504,7 +537,8 @@ layerN.addEventListener('click',ev=>{
   if(ev.target.classList.contains('chev')){
     if(n.collapsed)materialize(n);
     n.collapsed=!n.collapsed;el.classList.toggle('collapsed',n.collapsed);
-    ev.target.textContent=n.collapsed?'▸':'▾';n.h=el.offsetHeight;
+    ev.target.textContent=n.collapsed?'▸':'▾';
+    reflowColumn(n);
     drawFrames();drawWires();
   }else if(ev.target.classList.contains('eye')){
     n.hidden=true;positionNodes();applyFilters();

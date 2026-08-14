@@ -136,6 +136,13 @@ nœud (👁) · replier le code (▾) · sélection → fils animés · « Recen
 Chaque nœud porte un badge indiquant son fichier d'origine, et chaque classe,
 `struct` ou `namespace` occupe un couloir horizontal distinct.
 
+Le code déplié reste lisible : les nœuds situés en dessous dans la même
+colonne sont décalés d'autant, le nœud ouvert ou survolé passe au premier
+plan, la molette fait défiler un bloc de code trop long au lieu de zoomer, et
+le texte du code est sélectionnable pour être copié. Le double-clic n'est
+reconnu que si aucune des deux pressions n'a bougé — reprendre un nœud pour
+le déplacer ne déclenche donc jamais d'isolement.
+
 ## API
 
 ```python
