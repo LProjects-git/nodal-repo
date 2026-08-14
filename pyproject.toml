@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "nodal"
-version = "2.0.0"
-description = "Graphe d'appels interactif façon éditeur de nœuds Blender pour du code Python et C++"
+version = "3.0.0"
+description = "Graphe d'appels interactif façon éditeur de nœuds Blender pour un fichier ou un projet Python / C++"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }

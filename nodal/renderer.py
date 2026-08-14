@@ -20,6 +20,7 @@ def render_html(graph: Graph, output: str | Path) -> Path:
         "edges": [asdict(e) for e in graph.edges],
         "depth": layout(graph),
         "lang": graph.lang,
+        "files": graph.files,
     }
     payload = json.dumps(data, ensure_ascii=False).replace("</", "<\\/")
     out = Path(output)
@@ -73,8 +74,8 @@ _TEMPLATE = r"""<!doctype html>
 :root{
   --bg:#151517; --grid:#232327; --panel:#1e1e22; --line:#35353d;
   --node:#26262b; --node-border:#3a3a44; --text:#d6d6dc; --dim:#77777f;
-  --fn:#3d6fb8; --method:#7a5cc7; --ext:#c06a33; --frame:#2e4a4a;
-  --wire:#8fb6f2; --wire-ext:#e08a4e; --accent:#e6c25a;
+  --fn:#3d6fb8; --method:#7a5cc7; --ext:#c06a33; --unk:#a8434a; --frame:#2e4a4a;
+  --wire:#8fb6f2; --wire-ext:#e08a4e; --wire-unk:#e07a86; --accent:#e6c25a;
   --mono:ui-monospace,'Cascadia Code','JetBrains Mono',Menlo,Consolas,monospace;
 }
 *{box-sizing:border-box;margin:0}
@@ -89,6 +90,8 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);
 #search{background:var(--bg);border:1px solid var(--line);color:var(--text);
   border-radius:6px;padding:5px 10px;width:200px;font:inherit;outline:none}
 #search:focus{border-color:var(--wire)}
+select{background:var(--bg);border:1px solid var(--line);color:var(--text);
+  border-radius:6px;padding:5px 8px;font:inherit;max-width:220px}
 .tgl{display:flex;align-items:center;gap:5px;color:var(--dim);cursor:pointer;
   user-select:none;padding:4px 8px;border-radius:6px;border:1px solid transparent}
 .tgl input{accent-color:var(--accent)}
@@ -124,6 +127,11 @@ button:hover{border-color:var(--accent)}
 .node[data-kind=function] header{background:linear-gradient(180deg,color-mix(in srgb,var(--fn) 92%,#fff),var(--fn))}
 .node[data-kind=method]   header{background:linear-gradient(180deg,color-mix(in srgb,var(--method) 92%,#fff),var(--method))}
 .node[data-kind=external] header{background:linear-gradient(180deg,color-mix(in srgb,var(--ext) 92%,#fff),var(--ext))}
+.node[data-ext=unknown] header{background:linear-gradient(180deg,color-mix(in srgb,var(--unk) 92%,#fff),var(--unk))}
+.node[data-ext=unknown] .in{background:var(--wire-unk)}
+.node[data-ext=unknown] .ext-list div::before{content:'? ';color:#e07a86}
+.fbadge{font-weight:400;font-size:11px;opacity:.7;background:rgba(0,0,0,.28);
+  border-radius:4px;padding:1px 6px;margin-left:2px}
 .node header .sig{font-weight:400;opacity:.75;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .node header .chev{margin-left:auto;cursor:pointer;opacity:.8;padding:0 2px}
 .node header .eye{cursor:pointer;opacity:.8;padding:0 2px}
@@ -147,6 +155,7 @@ button:hover{border-color:var(--accent)}
 /* ---------- fils ---------- */
 path.w{fill:none;stroke:var(--wire);stroke-width:2;opacity:.55}
 path.w.ext{stroke:var(--wire-ext)}
+path.w.unk{stroke:var(--wire-unk)}
 path.w.hot{opacity:1;stroke-width:2.6;stroke-dasharray:7 5;animation:flow .5s linear infinite}
 @keyframes flow{to{stroke-dashoffset:-12}}
 path.w.off{opacity:.06}
@@ -159,6 +168,7 @@ path.w.off{opacity:.06}
   <label class="tgl"><input type="checkbox" id="t-fn" checked>fonctions</label>
   <label class="tgl"><input type="checkbox" id="t-me" checked>méthodes</label>
   <label class="tgl"><input type="checkbox" id="t-ex" checked>externes</label>
+  <select id="f-file" style="display:none"></select>
   <button id="reset">Tout réafficher</button>
   <button id="fit">Recentrer</button>
   <span id="stats"></span>
@@ -208,9 +218,12 @@ function hl(line){
 function makeNode(f){
   const el=document.createElement('div');
   el.className='node';el.dataset.kind=f.kind;el.dataset.id=f.id;
+  if(f.extkind)el.dataset.ext=f.extkind;
   const title=f.cls?`${f.cls}.<b>${f.name}</b>`:f.name;
+  const sig=f.extkind==='unknown'?'définition introuvable':(f.signature||'');
+  const badge=(MULTI&&f.file)?`<span class="fbadge">${f.file}</span>`:'';
   el.innerHTML=`<span class="in"></span>
-    <header><span>${title}</span><span class="sig">${f.signature||''}</span>
+    <header><span>${title}</span>${badge}<span class="sig">${sig}</span>
     <span class="eye" title="masquer">👁</span><span class="chev" title="replier">▾</span></header>`;
   if(f.kind==='external'){
     const d=document.createElement('div');d.className='ext-list code';
@@ -236,17 +249,21 @@ function build(){
   document.getElementById('file').textContent=' · '+DATA.path;
   const COL=430,GAP=46,LANE=70;
   const all=[...DATA.functions,
-             ...DATA.externals.map(e=>({...e,kind:'external',cls:null}))];
+             ...DATA.externals.map(e=>({...e,extkind:e.kind,kind:'external',cls:null}))];
   const owner=new Map();                       // id -> nom du groupe
   for(const g of DATA.classes) for(const m of g.members) owner.set(m,g.name);
 
   // couloirs : fonctions libres, puis chaque groupe, puis les externes
   const lanes=[{key:'',items:[]}];
   const byKey=new Map([['',lanes[0]]]);
-  for(const g of DATA.classes){const l={key:g.name,items:[]};lanes.push(l);byKey.set(g.name,l);}
+  for(const g of DATA.classes){
+    const k=(g.file||'')+'|'+g.name;
+    const l={key:k,items:[]};lanes.push(l);
+    for(const m of g.members)byKey.set(m,l);      // membre -> couloir
+  }
   const extLane={key:'\u0000ext',items:[]};lanes.push(extLane);
   for(const f of all){
-    const lane=f.kind==='external'?extLane:(byKey.get(owner.get(f.id))||lanes[0]);
+    const lane=f.kind==='external'?extLane:(byKey.get(f.id)||lanes[0]);
     lane.items.push(f);
   }
 
@@ -260,6 +277,7 @@ function build(){
       const d=DATA.depth[f.id]??0;
       const y=cols.get(d)??0;
       const n={el,x:d*COL,y:top+y,kind:f.kind,cls:owner.get(f.id)||null,
+               file:f.file||'',extkind:f.extkind||null,
                hidden:false,collapsed:false,lineno:f.lineno};
       nodes.set(f.id,n);place(n);
       const next=y+el.offsetHeight+GAP;
@@ -295,7 +313,7 @@ function drawWires(){
     const dx=Math.max(60,Math.abs(x2-x1)*.45);
     const p=document.createElementNS('http://www.w3.org/2000/svg','path');
     p.setAttribute('d',`M${x1},${y1} C${x1+dx},${y1} ${x2-dx},${y2} ${x2},${y2}`);
-    p.setAttribute('class','w'+(e.external?' ext':''));
+    p.setAttribute('class','w'+(e.external?(t.extkind==='unknown'?' unk':' ext'):''));
     if(sel){p.classList.add(e.src===sel||e.dst===sel?'hot':'off');}
     svg.appendChild(p);
   }
@@ -323,16 +341,21 @@ function drawFrames(){
 function applyFilters(){
   const q=document.getElementById('search').value.trim().toLowerCase();
   const show={function:tFn.checked,method:tMe.checked,external:tEx.checked};
+  const wantFile=fFile.value;
   let visible=0;
   for(const[id,n]of nodes){
     const okKind=show[n.kind];
-    const okText=!q||id.toLowerCase().includes(q);
-    n.el.classList.toggle('faded',!(okKind&&okText));
+    const okFile=!wantFile||n.kind==='external'||n.file===wantFile;
+    const label=(id.split('::').pop()||id).toLowerCase();
+    const okText=!q||label.includes(q);
+    n.el.classList.toggle('faded',!(okKind&&okText&&okFile));
     n.el.style.display=n.hidden?'none':'';
-    if(okKind&&okText&&!n.hidden)visible++;
+    if(okKind&&okText&&okFile&&!n.hidden)visible++;
   }
+  const nf=(DATA.files||[]).length;
   document.getElementById('stats').textContent=
-    `${visible}/${nodes.size} nœuds · ${DATA.edges.length} appels`;
+    `${visible}/${nodes.size} nœuds · ${DATA.edges.length} appels`
+    +(nf>1?` · ${nf} fichiers`:'');
   drawFrames();drawWires();
 }
 
@@ -395,7 +418,14 @@ function fit(){
   applyView();drawWires();
 }
 const tFn=document.getElementById('t-fn'),tMe=document.getElementById('t-me'),
-      tEx=document.getElementById('t-ex');
+      tEx=document.getElementById('t-ex'),fFile=document.getElementById('f-file');
+const MULTI=(DATA.files||[]).length>1;
+if(MULTI){
+  fFile.style.display='';
+  fFile.innerHTML='<option value="">tous les fichiers</option>'+
+    DATA.files.map(f=>`<option value="${f}">${f}</option>`).join('');
+  fFile.addEventListener('change',applyFilters);
+}
 [tFn,tMe,tEx].forEach(t=>t.addEventListener('change',applyFilters));
 document.getElementById('search').addEventListener('input',applyFilters);
 document.getElementById('reset').addEventListener('click',()=>{

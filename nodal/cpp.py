@@ -209,6 +209,7 @@ def _scan(path: Path, text: str) -> Graph:
             id=fid, name=name, kind="method" if cls else "function", cls=cls,
             lineno=l0, source="\n".join(lines[l0 - 1:l1]),
             signature=re.sub(r"\s+", " ", clean[m.start("paren"):close + 1]).strip(),
+            file=path.name,
         )
         bodies.append((fid, brace, end, cls))
 
@@ -276,12 +277,18 @@ def _scan(path: Path, text: str) -> Graph:
 
     edges: list[Edge] = []
     externals: dict[str, ExternalNode] = {}
+    includes = [m.group(1) for m in
+                re.finditer(r"#\s*include\s*[<\"]([^>\"]+)[>\"]", text)]
 
-    def add_external(group: str, member: str, src: str, line: int) -> None:
-        ext = externals.setdefault(group, ExternalNode(id=f"ext:{group}", name=group))
+    def add_external(group: str, member: str, src: str, line: int,
+                     kind: str = "module") -> None:
+        ext = externals.setdefault(group, ExternalNode(id=f"ext:{group}", name=group,
+                                                       kind=kind))
         if member and member not in ext.members:
             ext.members.append(member)
-        edges.append(Edge(src=src, dst=ext.id, lineno=line, external=True))
+        symbol = f"{group}::{member}" if kind in ("module", "deferred") else member
+        edges.append(Edge(src=src, dst=ext.id, lineno=line, external=True,
+                          symbol=symbol))
 
     def method_of(cname: str | None, mname: str, nargs: int | None = None,
                   seen_cls: frozenset[str] = frozenset()) -> str | None:
@@ -302,10 +309,15 @@ def _scan(path: Path, text: str) -> Graph:
         body = clean[start:end]
         # types locaux : `Foo bar;`, `Foo bar(...)`, `x = new Foo(`
         local: dict[str, str] = dict(attr_by_class.get(cls or "", {}))
+        declared: dict[str, str] = {}          # var -> type, y compris types inconnus
         for m in re.finditer(
                 rf"\b({_ID})\s*(?:<[^<>;{{}}]*>)?\s*[*&]?\s+({_ID})\s*[;=({{]", body):
-            if m.group(1) in classes and m.group(1) not in _SPECIFIERS:
+            if m.group(1) in _SPECIFIERS:
+                continue
+            if m.group(1) in classes:
                 local[m.group(2)] = m.group(1)
+            else:
+                declared[m.group(2)] = m.group(1)
         for m in re.finditer(rf"\b({_ID})\s*=\s*(?:new\s+)?({_ID})\s*[({{]", body):
             if m.group(2) in classes:
                 local[m.group(1)] = m.group(2)
@@ -328,7 +340,9 @@ def _scan(path: Path, text: str) -> Graph:
                     ctor = method_of(tname, tname)
                     if ctor:
                         edges.append(Edge(src=fid, dst=ctor, lineno=line))
-                    continue                            # sinon : type externe, ignoré
+                    else:                               # défini ailleurs ? à relier
+                        add_external(tname, tname, fid, line, kind="deferred")
+                    continue
 
             target: str | None = None
             if recv is None:
@@ -353,14 +367,19 @@ def _scan(path: Path, text: str) -> Graph:
                 edges.append(Edge(src=fid, dst=target, lineno=line))
             elif recv and op == "::":                   # std::sort, ns::f
                 add_external(recv, name, fid, line)
+            elif recv in declared:                      # obj.m() sur un type inconnu
+                add_external(declared[recv], name, fid, line, kind="deferred")
             elif recv:
                 continue                                # méthode d'un type externe
             elif name not in classes:
-                add_external("global", name, fid, line)
+                add_external("?", name, fid, line, kind="unknown")
 
+    for c in classes.values():
+        c.file = path.name
     return Graph(path=str(path), functions=list(functions.values()),
                  externals=list(externals.values()), classes=list(classes.values()),
-                 edges=edges, lang="cpp")
+                 edges=edges, lang="cpp", files=[path.name],
+                 meta={path.name: {"includes": includes}})
 
 
 # --------------------------------------------------------------------------- #
@@ -406,7 +425,8 @@ def _clang(path: Path, text: str, args: list[str]) -> Graph:
         functions[fid] = FuncNode(
             id=fid, name=c.spelling, kind="method" if cls else "function", cls=cls,
             lineno=l0, source="\n".join(lines[l0 - 1:l1]),
-            signature="(" + ", ".join(a.type.spelling for a in c.get_arguments()) + ")")
+            signature="(" + ", ".join(a.type.spelling for a in c.get_arguments()) + ")",
+            file=path.name)
         if cls:
             classes.setdefault(cls, ClassGroup(
                 name=cls, lineno=p.location.line,
@@ -419,10 +439,13 @@ def _clang(path: Path, text: str, args: list[str]) -> Graph:
         by_name.setdefault(f.name, f.id)
 
     def add_ext(group: str, member: str, src: str, line: int) -> None:
-        ext = externals.setdefault(group, ExternalNode(id=f"ext:{group}", name=group))
+        kind = "unknown" if group == "external" else "module"
+        ext = externals.setdefault(group, ExternalNode(id=f"ext:{group}", name=group,
+                                                       kind=kind))
         if member and member not in ext.members:
             ext.members.append(member)
-        edges.append(Edge(src=src, dst=ext.id, lineno=line, external=True))
+        edges.append(Edge(src=src, dst=ext.id, lineno=line, external=True,
+                          symbol=member))
 
     for c in tu.cursor.walk_preorder():
         if c.kind not in defs or not in_file(c) or not c.is_definition():
@@ -452,9 +475,11 @@ def _clang(path: Path, text: str, args: list[str]) -> Graph:
                 group = ns.spelling if ns and ns.kind == CursorKind.NAMESPACE else ""
                 add_ext(group or "external", ref.spelling, src, line)
 
+    for c in classes.values():
+        c.file = path.name
     return Graph(path=str(path), functions=list(functions.values()),
                  externals=list(externals.values()), classes=list(classes.values()),
-                 edges=edges, lang="cpp")
+                 edges=edges, lang="cpp", files=[path.name])
 
 
 # --------------------------------------------------------------------------- #

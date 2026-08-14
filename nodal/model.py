@@ -19,6 +19,7 @@ class FuncNode:
     lineno: int
     source: str
     signature: str
+    file: str = ""               # chemin relatif (projets multi-fichiers)
 
 
 @dataclass
@@ -27,6 +28,7 @@ class ExternalNode:
     id: str                      # "ext:std"
     name: str
     members: list[str] = field(default_factory=list)
+    kind: str = "module"         # module | builtin | unknown
 
 
 @dataclass
@@ -36,6 +38,7 @@ class Edge:
     dst: str
     lineno: int
     external: bool = False
+    symbol: str = ""             # nom appelé, pour la résolution inter-fichiers
 
 
 @dataclass
@@ -44,6 +47,7 @@ class ClassGroup:
     lineno: int
     members: list[str] = field(default_factory=list)
     stereotype: str = "class"    # class | struct | namespace
+    file: str = ""
 
 
 @dataclass
@@ -54,6 +58,8 @@ class Graph:
     classes: list[ClassGroup]
     edges: list[Edge]
     lang: str = "python"         # pilote la coloration côté HTML
+    files: list[str] = field(default_factory=list)   # fichiers analysés
+    meta: dict = field(default_factory=dict)         # imports/includes par fichier
 
 
 def layout(graph: Graph) -> dict[str, int]:
@@ -81,3 +87,42 @@ def layout(graph: Graph) -> dict[str, int]:
     for ext in graph.externals:
         depth[ext.id] = last
     return depth
+
+
+def drop_deferred(graph: Graph) -> Graph:
+    """Supprime les arêtes « différées » restées non résolues.
+
+    Un appel de méthode sur un type dont la définition n'est pas visible
+    (`std::ifstream f; f.good()`) est émis comme différé : utile à relier
+    dans un projet multi-fichiers, pur bruit dans un fichier isolé.
+    """
+    deferred = {x.id for x in graph.externals if x.kind == "deferred"}
+    if not deferred:
+        return graph
+    graph.edges = [e for e in graph.edges if e.dst not in deferred]
+    graph.externals = [x for x in graph.externals if x.id not in deferred]
+    return graph
+
+
+def rebuild_members(graph: Graph) -> Graph:
+    """Recalcule la liste des membres de chaque nœud externe à partir des
+    arêtes survivantes (après résolution inter-fichiers)."""
+    kept: dict[str, list[str]] = {}
+    for e in graph.edges:
+        if not e.external or not e.symbol:
+            continue
+        node = next((x for x in graph.externals if x.id == e.dst), None)
+        if node is None:
+            continue
+        member = e.symbol
+        for sep in ("::", "."):
+            prefix = node.name + sep
+            if member.startswith(prefix):
+                member = member[len(prefix):]
+                break
+        lst = kept.setdefault(e.dst, [])
+        if member and member not in lst:
+            lst.append(member)
+    for x in graph.externals:
+        x.members = kept.get(x.id, x.members)
+    return graph
