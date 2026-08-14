@@ -120,6 +120,16 @@ else:
 `g.functions`, `g.classes`, `g.externals`, `g.edges` sont des dataclasses —
 pratique pour détecter le code mort ou brancher tes propres traitements.
 
+## Compatibilité
+
+Windows, macOS et Linux, Python ≥ 3.10, aucune dépendance. Testé sur les
+points qui piègent habituellement le portage : BOM UTF-8 en tête de fichier,
+fins de ligne CRLF, noms de fichiers accentués, séparateurs `\` (les chemins
+sont normalisés en `/` dans les identifiants), et consoles Windows en cp1252
+ou cp437 — l'affichage retombe sur de l'ASCII plutôt que de planter.
+
+Le HTML produit est autonome et s'ouvre dans n'importe quel navigateur récent.
+
 ## Structure
 
 ```

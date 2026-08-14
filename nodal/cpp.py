@@ -498,7 +498,7 @@ def analyze_cpp(path: str | Path, *, backend: str = "scanner",
     if not path.is_file():
         raise AnalysisError(f"Fichier introuvable : {path}")
     try:
-        text = path.read_text(encoding="utf-8", errors="replace")
+        text = path.read_text(encoding="utf-8-sig", errors="replace")
     except OSError as exc:
         raise AnalysisError(f"Lecture impossible : {exc}") from exc
 

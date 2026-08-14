@@ -99,7 +99,7 @@ def analyze_python(path: str | Path) -> Graph:
     if not path.is_file():
         raise AnalysisError(f"Fichier introuvable : {path}")
     try:
-        text = path.read_text(encoding="utf-8")
+        text = path.read_text(encoding="utf-8-sig")   # tolère le BOM Windows
     except UnicodeDecodeError as exc:
         raise AnalysisError(f"{path} n'est pas un fichier texte UTF-8 ({exc})") from exc
     try:
