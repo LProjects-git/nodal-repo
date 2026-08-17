@@ -126,7 +126,7 @@ button:hover{border-color:var(--accent)}
   border-radius:8px 8px 0 0;color:#fff;font-weight:600}
 .node.collapsed header{border-radius:8px}
 .node:not(.collapsed){z-index:4}
-.node:hover{z-index:8}
+.node:hover{z-index:8;border-color:var(--wire)}
 .node[data-kind=function] header{background:linear-gradient(180deg,color-mix(in srgb,var(--fn) 92%,#fff),var(--fn))}
 .node[data-kind=method]   header{background:linear-gradient(180deg,color-mix(in srgb,var(--method) 92%,#fff),var(--method))}
 .node[data-kind=external] header{background:linear-gradient(180deg,color-mix(in srgb,var(--ext) 92%,#fff),var(--ext))}
@@ -157,10 +157,13 @@ button:hover{border-color:var(--accent)}
 .p{color:#c9a06a}.k{color:#c792ea}.s{color:#9ccc76}.c{color:#5d5d66;font-style:italic}
 .n{color:#e3a86e}.d{color:#7fb4f0;font-weight:600}
 /* ---------- fils ---------- */
-path.w{fill:none;stroke:var(--wire);stroke-width:2;opacity:.55}
+path.w{fill:none;stroke:var(--wire);stroke-width:1.6;opacity:.5;
+  stroke-linecap:round;transition:opacity .12s}
+path.w.loose{stroke-dasharray:2 6;opacity:.28}
 path.w.ext{stroke:var(--wire-ext)}
 path.w.unk{stroke:var(--wire-unk)}
-path.w.hot{opacity:1;stroke-width:2.6;stroke-dasharray:7 5;animation:flow .5s linear infinite}
+path.w.hot{opacity:1;stroke-width:2.4;stroke-dasharray:7 5;
+  animation:flow .5s linear infinite;filter:drop-shadow(0 0 4px currentColor)}
 @keyframes flow{to{stroke-dashoffset:-12}}
 path.w.off{opacity:.06}
 </style>
@@ -402,14 +405,34 @@ function materialize(n){
    Géométrie calculée depuis les coordonnées stockées : aucun appel à
    getBoundingClientRect, donc aucun recalcul de mise en page forcé.
    Le SVG est assemblé en une seule chaîne plutôt que nœud par nœud. */
-const HEADER_H=32;
+/* Hauteur d'en-tête et position du port d'entrée mesurées une fois sur le
+   DOM réel plutôt que devinées : une valeur en dur décalait tous les fils. */
+let HEADER_H=32, PORT_Y=19;
+function measure(){
+  const el=layerN.querySelector('.node');if(!el)return;
+  const h=el.querySelector('header'),i=el.querySelector('.in');
+  if(h)HEADER_H=h.offsetHeight;
+  if(i)PORT_Y=i.offsetTop+i.offsetHeight/2;
+}
+
+/* Origine du fil : le point de la ligne d'appel, ramené dans la fenêtre
+   visible du bloc de code. Sans ce recadrage, une ligne d'appel sortie du
+   cadre par le défilement interne laisse le fil partir dans le vide — c'est
+   le décalage que l'on observait après un dépliage. */
 function wireGeom(w){
   const s=w.s,t=w.t;
-  const inBody=w.ln&&!s.collapsed;
-  const x1=s.x+s.w+(inBody?6:0);
-  const y1=s.y+(inBody?w.dy:HEADER_H/2);
-  const x2=t.x, y2=t.y+HEADER_H/2;
-  return[x1,y1,x2,y2];
+  const code=w.ln?w.ln.parentElement:null;
+  const live=w.ln&&!s.collapsed&&code&&code.clientHeight>0;
+  let x1=s.x+s.w, y1=s.y+HEADER_H/2, anchored=false;
+  if(live){
+    const top=code.offsetTop, bottom=top+code.clientHeight;
+    const y=w.dy-code.scrollTop;
+    const clamped=Math.min(bottom-5,Math.max(top+5,y));
+    anchored=Math.abs(clamped-y)<1;               // la ligne est bien visible
+    x1+=anchored?6:0;
+    y1=s.y+clamped;
+  }
+  return[x1,y1,t.x,t.y+PORT_Y,anchored];
 }
 function drawWires(){
   const parts=[];
@@ -423,16 +446,31 @@ function drawWires(){
     // hors champ des deux côtés : inutile de tracer
     if(Math.max(s.x,t.x)<vx0||Math.min(s.x,t.x)>vx1||
        Math.max(s.y,t.y)<vy0||Math.min(s.y,t.y)>vy1)continue;
-    const[x1,y1,x2,y2]=wireGeom(w);
-    const dx=Math.max(60,Math.abs(x2-x1)*.45);
-    let cls='w'+(w.ext?(t.extkind==='unknown'?' unk':' ext'):'');
-    if(sel)cls+=(w.src===sel||w.dst===sel)?' hot':' off';
-    parts.push(`<path class="${cls}" d="M${x1.toFixed(1)},${y1.toFixed(1)} `
-      +`C${(x1+dx).toFixed(1)},${y1.toFixed(1)} ${(x2-dx).toFixed(1)},${y2.toFixed(1)} `
+    const[x1,y1,x2,y2,anchored]=wireGeom(w);
+    // Appel « en arrière » (la cible est à gauche) : au lieu d'un S écrasé,
+    // on sort par la droite puis on contourne, comme un câble qui fait le tour.
+    const back=x2<x1+40;
+    const dx=back?Math.max(120,(x1-x2)*.32+120):Math.max(60,(x2-x1)*.45);
+    const c1x=x1+dx, c2x=x2-dx;
+    const bow=back?Math.sign(y2-y1||1)*Math.min(90,Math.abs(y2-y1)*.25+30):0;
+    const kind=w.ext?(t.extkind==='unknown'?'unk':'ext'):'';
+    let cls='w'+(kind?' '+kind:'');
+    const mk=kind==='unk'?'ar-unk':kind==='ext'?'ar-ext':'ar';
+    if(!anchored&&w.ln&&!s.collapsed)cls+=' loose';  // ligne d'appel hors cadre
+    const hi=sel||hover;
+    if(hi)cls+=(w.src===hi||w.dst===hi)?' hot':' off';
+    parts.push(`<path class="${cls}" marker-end="url(#${mk})" `
+      +`d="M${x1.toFixed(1)},${y1.toFixed(1)} `
+      +`C${c1x.toFixed(1)},${(y1+bow).toFixed(1)} ${c2x.toFixed(1)},${(y2+bow).toFixed(1)} `
       +`${x2.toFixed(1)},${y2.toFixed(1)}"/>`);
   }
-  svg.innerHTML=parts.join('');
+  svg.innerHTML=MARKER+parts.join('');
 }
+const ARROW=(id,color)=>`<marker id="${id}" viewBox="0 0 8 8" refX="7.5" refY="4" `
+  +`markerWidth="6" markerHeight="6" orient="auto-start-reverse">`
+  +`<path d="M0,0.5 L8,4 L0,7.5 z" fill="${color}"/></marker>`;
+const MARKER='<defs>'+ARROW('ar','var(--wire)')+ARROW('ar-ext','var(--wire-ext)')
+  +ARROW('ar-unk','var(--wire-unk)')+'</defs>';
 let wirePending=false;
 function scheduleWires(){                      // au plus un dessin par image
   if(wirePending)return;
@@ -481,7 +519,19 @@ function applyFilters(){
 
 /* ---------- interactions ---------- */
 function applyView(){world.style.transform=`translate(${view.x}px,${view.y}px) scale(${view.k})`}
-let drag=null,lastId=null,lastTime=0;
+let drag=null,lastId=null,lastTime=0,hover=null;
+
+/* Survoler un nœud éclaire ses connexions : lire un graphe dense sans avoir
+   à cliquer. La sélection au clic reste prioritaire. */
+layerN.addEventListener('pointerover',ev=>{
+  const el=ev.target.closest&&ev.target.closest('.node');
+  const id=el?el.dataset.id:null;
+  if(id!==hover){hover=id;if(!sel)scheduleWires();}
+});
+layerN.addEventListener('pointerout',ev=>{
+  if(ev.relatedTarget&&ev.relatedTarget.closest&&ev.relatedTarget.closest('.node'))return;
+  if(hover!==null){hover=null;if(!sel)scheduleWires();}
+});
 vp.addEventListener('pointerdown',ev=>{
   const header=ev.target.closest('header'),nodeEl=ev.target.closest('.node');
   if(ev.target.classList.contains('chev')||ev.target.classList.contains('eye'))return;
@@ -531,6 +581,7 @@ vp.addEventListener('wheel',ev=>{
   view.y=ev.clientY-(ev.clientY-view.y)*k/view.k;
   view.k=k;applyView();scheduleWires();
 },{passive:false});
+layerN.addEventListener('scroll',()=>scheduleWires(),true);  // défilement du code
 layerN.addEventListener('click',ev=>{
   const el=ev.target.closest('.node');if(!el)return;
   const n=nodes.get(el.dataset.id);
@@ -613,7 +664,7 @@ function isolate(id){
 }
 
 
-build();applyFilters();fit();
+build();measure();applyFilters();fit();
 </script>
 </body>
 </html>

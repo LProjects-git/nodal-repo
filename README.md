@@ -136,6 +136,14 @@ nœud (👁) · replier le code (▾) · sélection → fils animés · « Recen
 Chaque nœud porte un badge indiquant son fichier d'origine, et chaque classe,
 `struct` ou `namespace` occupe un couloir horizontal distinct.
 
+Les fils s'ancrent exactement sur la ligne d'appel et sur le port d'entrée
+du nœud cible, mesurés sur le DOM réel. Si la ligne d'appel sort du cadre par
+le défilement interne, le fil est ramené au bord et passe en pointillé plutôt
+que de partir dans le vide ; il redevient plein dès que la ligne réapparaît.
+Un appel « en arrière » (cible à gauche) contourne par un arc au lieu d'un S
+écrasé, et **survoler un nœud éclaire ses connexions** en estompant le reste —
+de quoi lire un graphe dense sans cliquer.
+
 Le code déplié reste lisible : les nœuds situés en dessous dans la même
 colonne sont décalés d'autant, le nœud ouvert ou survolé passe au premier
 plan, la molette fait défiler un bloc de code trop long au lieu de zoomer, et
